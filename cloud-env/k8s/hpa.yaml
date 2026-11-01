@@ -1,0 +1,37 @@
+# Mirrors controller/hpa_baseline.py and simulator/config.py. The behavior
+# values below are Kubernetes' defaults, written out so the match is visible.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: scale-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: scale-app
+  minReplicas: 1   # simulator min_replicas
+  maxReplicas: 20  # simulator max_replicas
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60  # simulator HPA target_cpu_pct
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0  # scale up immediately
+      selectPolicy: Max
+      policies:  # per 15 s: add up to 4 pods or double, whichever is more
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 5 min = simulator's 20-tick window
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15

@@ -1,0 +1,27 @@
+# Runs Locust INSIDE the cluster, so traffic goes through the Service and is
+# spread across every pod. (port-forward would send it all to one pod.)
+# Needs the ramp.py ConfigMap first -- see cloud-env/README.md.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: locust-ramp
+spec:
+  backoffLimit: 0  # a failed run should be looked at, not silently retried
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: locust
+          image: locustio/locust:2.47.0
+          args: ["-f", "/mnt/locust/ramp.py", "--headless", "--host", "http://scale-app", "--print-stats"]
+          resources:
+            requests:
+              cpu: "1"  # so the load generator isn't the bottleneck
+              memory: 256Mi
+          volumeMounts:
+            - name: locustfile
+              mountPath: /mnt/locust
+      volumes:
+        - name: locustfile
+          configMap:
+            name: locustfile

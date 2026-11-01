@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scale-app
+spec:
+  replicas: 2  # simulator initial_replicas; HPA takes over from here
+  selector:
+    matchLabels:
+      app: scale-app
+  template:
+    metadata:
+      labels:
+        app: scale-app
+    spec:
+      containers:
+        - name: app
+          image: scale-app:local  # built locally and loaded into the cluster
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            # CPU ms burned per /work request. Server overhead adds ~0.8 ms, so
+            # 4.2 gives ~5 ms total = 50 req/s per pod at 100% of 250m.
+            # Re-check with the README's calibration if you change the app.
+            - name: WORK_MS
+              value: "4.2"
+          resources:
+            # HPA measures CPU as % of this request. No request = no autoscaling.
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            # Limit is above the request on purpose: with limit == request,
+            # Linux pauses the pod during bursts (CFS throttling) and latency
+            # roughly triples at only ~60% CPU. One Python process can't use
+            # more than ~1 core anyway, so HPA can see up to ~400% here
+            # (the simulator caps cpu_pct at 100%).
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          # On scale-down, keep serving for 5 s while the Service stops
+          # routing to this pod; otherwise in-flight connections are refused.
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            periodSeconds: 2
+            # A saturated pod is slow, not dead: give it time so it isn't
+            # pulled from the Service, which would overload the others.
+            timeoutSeconds: 3
+            failureThreshold: 3
