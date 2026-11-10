@@ -46,6 +46,7 @@ FIXED_COLORS = {
     "llm": PALETTE[1],
     "llm_context": PALETTE[2],
     "scheduled": PALETTE[3],
+    "keda": PALETTE[4],
 }
 NEUTRAL = "#8a8984"  # static baselines and overflow
 TEXT = "#0b0b0b"

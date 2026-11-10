@@ -11,6 +11,7 @@ Decision-making logic for autoscaling — both the baselines and the LLM-based c
 | `human.py` | done | you are the autoscaler (interactive CLI) |
 | `llm_client.py` | done | Anthropic API wrapper: `.env` key, retries, timeout, disk cache, offline replay |
 | `hpa_baseline.py` | done | Kubernetes HPA formula (Pair A) |
+| `keda_baseline.py` | done | KEDA-style scaling on request rate instead of CPU |
 | `openrouter_client.py` | done | same interface, but calls OpenRouter (non-Anthropic models); reuses the cache and offline replay |
 | `llm_controller.py` | **partly stub** | plumbing done; prompt + parser are Pair B's |
 | `scheduled_baseline.py` | **stub** | cron-style pre-scaling (stretch goal) |
