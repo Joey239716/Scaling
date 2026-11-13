@@ -11,6 +11,10 @@ spec:
     metadata:
       labels:
         app: scale-app
+      annotations:  # tell Prometheus to read /metrics (used by KEDA, harmless for HPA)
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics/
     spec:
       containers:
         - name: app

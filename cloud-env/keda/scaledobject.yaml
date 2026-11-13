@@ -1,0 +1,44 @@
+# KEDA alternative to k8s/hpa.yaml: scales on request rate instead of CPU.
+# Everything except the metric matches hpa.yaml, so HPA vs KEDA runs differ
+# only in WHAT they watch. Use one or the other: KEDA creates its own HPA
+# (keda-hpa-scale-app) and refuses to start while k8s/hpa.yaml's HPA exists.
+# Switch with: python cloud-env/run_experiment.py --autoscaler keda ...
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: scale-app
+spec:
+  scaleTargetRef:
+    name: scale-app
+  pollingInterval: 15  # seconds; same as HPA's 15 s sync and metrics-server
+  minReplicaCount: 1   # same as hpa.yaml (no scale-to-zero, to compare like for like)
+  maxReplicaCount: 20
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:  # copied from hpa.yaml -- keep the two in sync
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          selectPolicy: Max
+          policies:
+            - type: Pods
+              value: 4
+              periodSeconds: 15
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc
+        # Total /work req/s across all pods. [45s] = 3 scrapes at 15 s: about
+        # as fresh as HPA's CPU reading, and survives one missed scrape.
+        query: sum(rate(app_requests_total{app="scale-app"}[45s]))
+        # Target req/s PER POD: desired = ceil(total / 30). A pod serves
+        # 50 req/s at 100% CPU, so 30 req/s = 60% -- HPA's operating point.
+        threshold: "30"

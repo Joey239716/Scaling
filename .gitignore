@@ -18,6 +18,7 @@ kubeconfig
 # Experiment outputs (keep configs, not raw logs, unless you decide otherwise per-experiment)
 experiments/**/results/
 experiments/**/*.log
+cloud-env/results/
 
 # OS / editor
 .DS_Store

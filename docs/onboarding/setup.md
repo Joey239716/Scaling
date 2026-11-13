@@ -28,11 +28,13 @@ cd SCALE
 
 ```bash
 # Minikube
-minikube start
+minikube start --cpus=6 --memory=5g
 
 # or kind
 kind create cluster --name scale
 ```
+
+**Give Minikube enough CPU.** With the Docker driver, Minikube caps the whole cluster at **2 CPUs** by default, even though `kubectl describe node` reports every CPU on your machine. At ~300 req/s the app, Locust and Prometheus need more than that, and the whole cluster gets throttled: requests stall in 100 ms steps and latency jumps from ~10 ms to ~1 s. Use the same size as the rest of the team so results are comparable. The size is fixed when the cluster is created: to change it, run `minikube delete` and start again. On kind, the limit is Docker Desktop's own CPU setting.
 
 Verify it's up:
 

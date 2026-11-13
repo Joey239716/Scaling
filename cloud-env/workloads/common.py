@@ -18,16 +18,37 @@ COOLDOWN_END = PATTERN_END + 450  # 1650 s
 IDLE = 20  # req/s during cooldown
 
 
+RECONNECT_EVERY = 10  # requests (~10 s) per connection
+
+
 class AppUser(FastHttpUser):
+    """Sends 1 request/s, reconnecting every RECONNECT_EVERY requests.
+
+    Why reconnect at all: Kubernetes picks a pod per *connection*, so with
+    plain keep-alive each user stays on whichever pod it first hit. Early
+    users pile onto the original pods while pods the autoscaler adds later
+    sit half idle. Reconnecting every ~10 s moves load onto new pods quickly.
+
+    Why not a new connection per request: at ~300 req/s that churns so many
+    connections that the node's connection table reuses ports too soon and
+    drops connection attempts; each drop costs a 1 s TCP retry, and median
+    latency jumped from ~100 ms to ~1.1 s even on idle pods.
+    """
+
     wait_time = constant_throughput(1)  # 1 request/s per user
+
+    def on_start(self):
+        self.sent = 0
 
     @task
     def work(self):
-        # New connection per request. Kubernetes picks a pod per *connection*,
-        # so with keep-alive each user stays stuck on whichever pod it first
-        # hit: early users pile onto the original pods and pods HPA adds
-        # later sit half idle. Closing the connection spreads every request.
-        self.client.get("/work", headers={"Connection": "close"})
+        self.sent += 1
+        if self.sent % RECONNECT_EVERY == 0:
+            # Server closes the connection after this reply; the next
+            # request opens a new one, which may land on a different pod.
+            self.client.get("/work", headers={"Connection": "close"})
+        else:
+            self.client.get("/work")
 
 
 class RateShape(LoadTestShape):

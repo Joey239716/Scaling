@@ -1,13 +1,74 @@
 # cloud-env/
 
-The Phase 1 test environment: a small app that HPA scales on a local Kubernetes cluster, driven by Locust traffic. Tool setup (Docker, kubectl, Minikube/kind, metrics server) is in [docs/onboarding/setup.md](../docs/onboarding/setup.md), steps 1–4.
+The test environment: a small app on a local Kubernetes cluster, scaled by either HPA (on CPU) or KEDA (on request rate), driven by Locust traffic. Tool setup (Docker, kubectl, Minikube/kind, metrics server) is in [docs/onboarding/setup.md](../docs/onboarding/setup.md), steps 1–4.
 
 ```
 cloud-env/
-├── app/        # FastAPI service + Dockerfile
-├── k8s/        # Deployment, Service, HPA
-└── workloads/  # Locust workloads + the Job that runs them in-cluster
+├── app/               # FastAPI service + Dockerfile (also reports req counts at /metrics)
+├── k8s/               # Deployment, Service, HPA (the default autoscaler)
+├── keda/              # KEDA alternative: ScaledObject + Prometheus settings
+├── workloads/         # Locust workloads + the Job that runs them in-cluster
+├── run_experiment.py  # one workload x one autoscaler -> results/
+└── results/           # run outputs (git-ignored)
 ```
+
+## HPA vs KEDA
+
+| | HPA (`k8s/hpa.yaml`) | KEDA (`keda/scaledobject.yaml`) |
+|---|---|---|
+| Watches | Average CPU, % of each pod's 250m request | Total `/work` req/s from Prometheus |
+| Target | 60% CPU | 30 req/s per pod (= 60% of a pod's 50 req/s) |
+| Formula | `ceil(pods × cpu / 60%)` | `ceil(total req/s ÷ 30)` |
+| Metric freshness | metrics-server every 15 s | Prometheus scrape + KEDA poll every 15 s, rate over 45 s |
+| Replicas, tolerance, scale-up/down rules | 1–20, 10%, immediate up, 5 min down | identical (copied into the ScaledObject) |
+
+Only the metric differs, so a difference in results comes from *what* each one watches. Keep the two files' `behavior` blocks in sync if you change one.
+
+What that difference means in practice: CPU only rises once pods are doing the work, while request rate counts requests as they arrive (before they queue), so KEDA should react earlier to sudden load. When pods are overloaded, CPU tops out (one Python process uses at most ~1 core), but the request count keeps rising.
+
+### Cluster size matters
+
+Create Minikube with `--cpus=6 --memory=5g` (see setup.md step 3). Minikube's default is 2 CPUs for the whole cluster, which throttles everything at ~300 req/s and makes latency results meaningless. Check with `docker inspect minikube --format '{{.HostConfig.NanoCpus}}'`; it should print `6000000000`.
+
+### One-time KEDA setup
+
+Needs [Helm](https://helm.sh/docs/intro/install/). From the repo root:
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+helm install prometheus prometheus-community/prometheus --version 29.47.2 \
+  -n monitoring --create-namespace -f cloud-env/keda/prometheus-values.yaml --wait
+helm install keda kedacore/keda --version 2.21.0 -n keda --create-namespace --wait
+```
+
+Both survive `minikube stop`/`start`.
+
+## Running experiments
+
+`run_experiment.py` does a whole run: removes any old test and autoscaler, starts from 2 idle pods, turns on the chosen autoscaler, runs the workload, and records everything.
+
+```bash
+python cloud-env/run_experiment.py --workload spike --autoscaler hpa
+python cloud-env/run_experiment.py --workload spike --autoscaler keda
+# if your kubectl is too old for the cluster:
+python cloud-env/run_experiment.py --workload spike --autoscaler keda --kubectl "minikube kubectl --"
+```
+
+Workloads: `ramp`, `spike`, `periodic`, `bursty`, `step` (27.5 min each), and `smoke` (5 min, for checking a setup works). Needs `pyyaml` (in the repo's `requirements.txt`). It also sets metrics-server to a 15 s refresh if it isn't already, because Minikube resets it on restart.
+
+Each run writes `cloud-env/results/<time>_<workload>_<autoscaler>/`:
+
+| File | Contents |
+|---|---|
+| `replicas.csv` | Every 15 s: ready replicas, desired replicas, and the metric the autoscaler saw (CPU % for HPA, req/s per pod for KEDA) |
+| `locust_stats_history.csv` | Locust's req/s, response times and failures over time |
+| `locust_stats.csv`, `locust_failures.csv` | Run totals and any errors |
+| `locust.log` | Locust's console output (includes `bursty.py`'s burst schedule) |
+| `run.json` | Workload, autoscaler, seed, git commit, start/end times |
+
+Copying Locust's CSVs off the cluster uses `minikube cp`; on kind, copy `/data/results` out of the node container yourself.
 
 ## How it lines up with the simulator
 
@@ -20,7 +81,7 @@ cloud-env/
 
 Known differences:
 - **CPU can read above 100% here.** The CPU limit (1 core) is above the request, so HPA can see up to ~400%; the simulator caps at 100%. Setting limit = request would match the cap, but the pod then gets paused during bursts (CFS throttling): we measured ~480 ms average latency at ~60% CPU, versus ~115 ms with the higher limit.
-- **HPA sees CPU up to ~1–2 minutes late.** Minikube's metrics-server addon refreshes every 60 s (`--metric-resolution=60s`), and the reading is an average over that window. The simulator's HPA sees each tick's CPU immediately.
+- **HPA sees CPU ~15–30 s late.** Minikube's metrics-server addon defaults to a 60 s refresh (`--metric-resolution=60s`), which made HPA 1–2 minutes late; `run_experiment.py` sets it to 15 s. The simulator's HPA sees each tick's CPU immediately.
 - **Pods start in seconds**, not the simulator's 30 s startup delay.
 - **The 10% tolerance** is the Kubernetes default, not set in the manifest.
 
@@ -38,11 +99,11 @@ Every workload runs a 20-minute pattern (the simulator's 80 ticks), then 7.5 min
 
 `bursty.py` is random but repeatable: the bursts come from a fixed seed (`BURST_SEED` in `locust-job.yaml`, default 42), so every controller faces the same traffic. The schedule is printed at the top of the Locust logs.
 
-Shared code lives in `common.py`: the user class (including the new-connection-per-request fix) and `RateShape`, which handles the cooldown and stop. A new workload only has to subclass `common.RateShape` and write `rate(t)`. See `step.py` for the shortest example.
+Shared code lives in `common.py`: the user class (which reconnects every 10 requests so load spreads onto new pods) and `RateShape`, which handles the cooldown and stop. A new workload only has to subclass `common.RateShape` and write `rate(t)`. See `step.py` for the shortest example.
 
-## Run it
+## Run it by hand
 
-Commands use `kubectl`. On Minikube, if your `kubectl` is more than one minor version away from the cluster (Docker Desktop's bundled one often is), use `minikube kubectl --` in its place.
+`run_experiment.py` above is the normal way. These are the manual steps, useful for debugging. Commands use `kubectl`. On Minikube, if your `kubectl` is more than one minor version away from the cluster (Docker Desktop's bundled one often is), use `minikube kubectl --` in its place.
 
 **1. Build and deploy** (from the repo root):
 
@@ -68,7 +129,7 @@ The ConfigMap holds the whole folder, because each workload imports `common.py`.
 **3. Watch it scale**, in another terminal:
 
 ```bash
-kubectl get hpa scale-app -w
+kubectl get hpa -w      # HPA's is "scale-app"; KEDA's is "keda-hpa-scale-app"
 ```
 
 At the 60% target each pod takes ~30 req/s, so expect roughly `req/s ÷ 30` replicas: ~17 at 500 req/s. Scale-down starts about 5 minutes after load drops.
@@ -91,20 +152,35 @@ Do this if you change the app, the CPU request, or the machine. The ~0.8 ms of s
 3. After about 2 minutes, `kubectl top pods -l app=scale-app` should show ~125m per pod (50%). If it doesn't, adjust `WORK_MS` in `k8s/deployment.yaml` and repeat.
 4. Re-apply the HPA: `kubectl apply -f cloud-env/k8s/hpa.yaml`.
 
-Use a new connection per request in the calibration user too (see `ramp.py`), or the load won't split evenly.
+Use `common.AppUser` in the calibration locustfile too (e.g. a file containing just `from common import AppUser`), so connections are handled the same way as in real runs.
 
-Measured on 2026-10-31 (Minikube 1.39, Kubernetes 1.37, Docker driver, Windows 10): 50.3 req/s → 124m + 128m across 2 pods (~5.0 ms per request), ~104 ms average latency.
+Measured on 2026-11-12 (Minikube 1.39, 6 CPUs / 5 GB, Kubernetes 1.37, Docker driver, Windows 10): 50.3 req/s → 234m total across 2 pods (~4.7 ms per request), 64 ms average latency, 0 failures.
 
 ## First results (2026-10-31)
+
+**These ran on a 2-CPU Minikube cluster (the default), which was throttled above ~250 req/s, and on an app that handled `/work` in a thread pool. Their latency numbers aren't valid.** See "Fixes found 2026-11-12" below.
 
 - **Full ramp, before the connection fix:** HPA scaled 2 → 11 pods and back down to 1 after the drop, but load plateaued at ~345 req/s instead of 500. Locust's keep-alive connections stayed on the oldest pods, which saturated while newer pods sat half idle. Average CPU read ~62%, inside HPA's tolerance, so it stopped scaling. Fixed with a new connection per request.
 - **5-minute check after the fix** (100 → 300 req/s over 2 min, then hold): CPU was even across pods, 0 failures in 73k requests, and the HPA reached 9 pods. Latency during the ramp was high (587 ms average) because the HPA lagged behind the 60 s metrics refresh. **The full 25-minute ramp has not been rerun since the fix.**
 
+## Fixes found 2026-11-12
+
+High latency (median ~1 s at only ~60% CPU) had three causes, found while adding KEDA:
+
+1. **Minikube capped the whole cluster at 2 CPUs.** At ~300 req/s the cluster used ~2 cores in total and everything was throttled in 100 ms slices. Fixed by creating the cluster with `--cpus=6 --memory=5g`.
+2. **`/work` ran in a thread pool.** The spinning worker threads starved the main thread (which accepts and answers requests) of Python's GIL. It now runs on the main thread, one request at a time.
+3. **A new connection on every request** made Locust reuse source ports faster than the node's connection table expired them, so connection attempts were dropped and retried after 1 s. Locust now reconnects every 10 requests, which still spreads load onto new pods within ~10 s.
+
+Same test before and after (10 fixed pods, steady 300 req/s): median latency 1100 ms → 74 ms, worst case 7.7 s → 0.6 s, 247 → 299.5 req/s delivered, 0 failures.
+
+**Open question:** Locust reports a median of ~60–75 ms even at light load, while single `curl` requests from inside the cluster take ~6 ms. It's the same in every run, so it doesn't bias HPA vs KEDA comparisons, but absolute latencies are probably inflated by the load generator.
+
 ## Troubleshooting
 
-- **A pod shows `0/1` ready under load:** its readiness probe is timing out. `/healthz` is `async` so it doesn't queue behind `/work`, and the probe allows 3 s. Keep both if you change the app.
+- **Latency in 100 ms steps (~100, 200, 400 ms ...) while pods aren't busy:** the whole cluster is CPU-throttled. Check the Minikube size (see "Cluster size matters").
+- **A pod shows `0/1` ready under load:** its readiness probe is timing out (it allows 3 s). Only expected when a pod is far past capacity (~200 req/s each).
 - **HPA shows `<unknown>`:** normal for ~1 minute after deploying. If it persists, see setup.md troubleshooting.
 - **`job.batch "locust-run"` already exists:** delete the old Job first (see "Run it again").
 - **Locust exits with `ModuleNotFoundError: No module named 'common'`:** the ConfigMap was made from a single file. Recreate it from the whole folder (`--from-file=cloud-env/workloads/`).
 - **Job shows `Failed` but the run looks fine:** Locust exits with an error if *any* request failed. Check `kubectl logs job/locust-run` for the error report. `ConnectionRefusedError` during scale-down means the `preStop` sleep in the Deployment is missing.
-- **HPA scales up but a few pods do most of the work:** the load generator is reusing connections. Each request must open a new one (`Connection: close` in `ramp.py`).
+- **The autoscaler adds pods but a few pods do most of the work:** connections are being reused forever. Workloads must use `common.AppUser`, which reconnects every 10 requests. (Reconnecting on *every* request causes the opposite problem at ~300 req/s: dropped connection attempts and 1 s TCP retries.)

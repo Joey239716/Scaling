@@ -1,0 +1,24 @@
+# Helm values for prometheus-community/prometheus (chart 29.47.2).
+# Just the Prometheus server: it reads /metrics from every pod annotated
+# prometheus.io/scrape=true (see k8s/deployment.yaml) so KEDA can query it.
+server:
+  global:
+    scrape_interval: 15s      # same freshness as metrics-server (HPA) at 15 s
+    evaluation_interval: 15s
+  retention: 1d               # experiment data is saved per run, not kept here
+  persistentVolume:
+    enabled: false            # fine for a local test cluster
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+
+# Not needed for autoscaling experiments; off to save laptop resources.
+alertmanager:
+  enabled: false
+kube-state-metrics:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+prometheus-pushgateway:
+  enabled: false

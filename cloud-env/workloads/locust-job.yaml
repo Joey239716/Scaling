@@ -2,8 +2,9 @@
 # spread across every pod. (port-forward would send it all to one pod.)
 # Needs the workloads ConfigMap first -- see cloud-env/README.md.
 #
-# To pick a workload, change WORKLOAD below: ramp.py, spike.py, periodic.py,
-# bursty.py or step.py.
+# Normally started by cloud-env/run_experiment.py, which fills in WORKLOAD
+# and RUN_ID. To run by hand, change WORKLOAD below: ramp.py, spike.py,
+# periodic.py, bursty.py, step.py or smoke.py.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -19,9 +20,14 @@ spec:
           env:
             - name: WORKLOAD
               value: ramp.py
+            - name: RUN_ID  # names the CSV files in /data/results on the node
+              value: manual
             - name: BURST_SEED  # only used by bursty.py
               value: "42"
-          args: ["-f", "/mnt/locust/$(WORKLOAD)", "--headless", "--host", "http://scale-app", "--print-stats"]
+          args: ["-f", "/mnt/locust/$(WORKLOAD)", "--headless", "--host", "http://scale-app",
+                 "--print-stats", "--csv", "/results/$(RUN_ID)", "--csv-full-history"]
+          securityContext:
+            runAsUser: 0  # the results folder on the node is root-owned (local test cluster only)
           resources:
             requests:
               cpu: "1"  # so the load generator isn't the bottleneck
@@ -29,7 +35,13 @@ spec:
           volumeMounts:
             - name: workloads
               mountPath: /mnt/locust
+            - name: results
+              mountPath: /results
       volumes:
         - name: workloads
           configMap:
             name: workloads
+        - name: results  # survives the pod; run_experiment.py copies it off with `minikube cp`
+          hostPath:
+            path: /data/results
+            type: DirectoryOrCreate
