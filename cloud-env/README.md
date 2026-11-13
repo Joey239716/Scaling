@@ -16,13 +16,29 @@ cloud-env/
 | Capacity per pod | 250m CPU request, ~5 ms CPU per `/work` request → 100% at ~50 req/s | `capacity_per_replica = 50` |
 | Replicas | min 1, max 20, starts at 2 | same |
 | HPA | 60% CPU target, scale up immediately, 5 min scale-down window | same (`controller/hpa_baseline.py`) |
-| `ramp.py` | 100 → 500 req/s over ticks 10–50, hold, then drop to 20 req/s | `experiments/configs/ramp.yaml` (without the drop) |
+| Workloads | `ramp.py` and `spike.py` follow the simulator's tick timing (1 tick = 15 s) | `experiments/configs/ramp.yaml`, `spike.yaml` |
 
 Known differences:
 - **CPU can read above 100% here.** The CPU limit (1 core) is above the request, so HPA can see up to ~400%; the simulator caps at 100%. Setting limit = request would match the cap, but the pod then gets paused during bursts (CFS throttling): we measured ~480 ms average latency at ~60% CPU, versus ~115 ms with the higher limit.
 - **HPA sees CPU up to ~1–2 minutes late.** Minikube's metrics-server addon refreshes every 60 s (`--metric-resolution=60s`), and the reading is an average over that window. The simulator's HPA sees each tick's CPU immediately.
 - **Pods start in seconds**, not the simulator's 30 s startup delay.
 - **The 10% tolerance** is the Kubernetes default, not set in the manifest.
+
+## Workloads
+
+Every workload runs a 20-minute pattern (the simulator's 80 ticks), then 7.5 minutes at 20 req/s so you can watch HPA's 5-minute scale-down, then stops: **27.5 minutes each**. Each simulated user sends 1 request/s, so users = req/s.
+
+| File | Pattern (first 20 min) | What it tests | Simulator twin |
+|---|---|---|---|
+| `ramp.py` | 100 req/s, climbs to 500 between 2:30 and 12:30, holds | Gradual growth; HPA should cope well | `ramp.yaml` |
+| `spike.py` | 100, instant jump to 500 from 7:30 to 12:30, back to 100 | Sudden load with no warning; HPA lags behind | `spike.yaml` |
+| `periodic.py` | Smooth wave 100 → 400 → 100, two 10-minute cycles | Predictable cycles; does HPA track them or lag? | none yet |
+| `bursty.py` | 100 baseline, random 30–90 s bursts to 250–500, every 1–3 min | Over-reacting to brief spikes, flapping | none yet |
+| `step.py` | 100 → 200 → 300 → 400 → 500, 4 minutes per step | How long HPA takes to settle at each level | none yet |
+
+`bursty.py` is random but repeatable: the bursts come from a fixed seed (`BURST_SEED` in `locust-job.yaml`, default 42), so every controller faces the same traffic. The schedule is printed at the top of the Locust logs.
+
+Shared code lives in `common.py`: the user class (including the new-connection-per-request fix) and `RateShape`, which handles the cooldown and stop. A new workload only has to subclass `common.RateShape` and write `rate(t)`. See `step.py` for the shortest example.
 
 ## Run it
 
@@ -39,13 +55,15 @@ kubectl rollout status deployment/scale-app
 
 After a rebuild with the same tag, run `kubectl rollout restart deployment/scale-app` so the pods pick up the new image.
 
-**2. Run the ramp load test** (about 25 minutes):
+**2. Run a workload** (27.5 minutes). First pick one by setting `WORKLOAD` in `cloud-env/workloads/locust-job.yaml` (default `ramp.py`). Then:
 
 ```bash
-kubectl create configmap locustfile --from-file=cloud-env/workloads/ramp.py
+kubectl create configmap workloads --from-file=cloud-env/workloads/
 kubectl apply -f cloud-env/workloads/locust-job.yaml
-kubectl logs -f job/locust-ramp      # live request stats
+kubectl logs -f job/locust-run      # live request stats
 ```
+
+The ConfigMap holds the whole folder, because each workload imports `common.py`.
 
 **3. Watch it scale**, in another terminal:
 
@@ -53,13 +71,13 @@ kubectl logs -f job/locust-ramp      # live request stats
 kubectl get hpa scale-app -w
 ```
 
-Replicas should climb from 2 toward ~17 as load reaches 500 req/s (at the 60% target each pod takes ~30 req/s), hold, then fall back about 5 minutes after the drop.
+At the 60% target each pod takes ~30 req/s, so expect roughly `req/s ÷ 30` replicas: ~17 at 500 req/s. Scale-down starts about 5 minutes after load drops.
 
-**Run it again:** delete the old Job and ConfigMap first (a Job runs once):
+**Run it again, or switch workload:** delete the old Job and ConfigMap first. A Job runs once, and the ConfigMap must be recreated to pick up edited scripts:
 
 ```bash
-kubectl delete job locust-ramp
-kubectl delete configmap locustfile
+kubectl delete job locust-run
+kubectl delete configmap workloads
 ```
 
 **Clean up everything:** `kubectl delete -f cloud-env/k8s/` plus the two deletes above.
@@ -86,6 +104,7 @@ Measured on 2026-10-31 (Minikube 1.39, Kubernetes 1.37, Docker driver, Windows 1
 
 - **A pod shows `0/1` ready under load:** its readiness probe is timing out. `/healthz` is `async` so it doesn't queue behind `/work`, and the probe allows 3 s. Keep both if you change the app.
 - **HPA shows `<unknown>`:** normal for ~1 minute after deploying. If it persists, see setup.md troubleshooting.
-- **`job.batch "locust-ramp"` already exists:** delete the old Job first (see "Run it again").
-- **Job shows `Failed` but the run looks fine:** Locust exits with an error if *any* request failed. Check `kubectl logs job/locust-ramp` for the error report. `ConnectionRefusedError` during scale-down means the `preStop` sleep in the Deployment is missing.
+- **`job.batch "locust-run"` already exists:** delete the old Job first (see "Run it again").
+- **Locust exits with `ModuleNotFoundError: No module named 'common'`:** the ConfigMap was made from a single file. Recreate it from the whole folder (`--from-file=cloud-env/workloads/`).
+- **Job shows `Failed` but the run looks fine:** Locust exits with an error if *any* request failed. Check `kubectl logs job/locust-run` for the error report. `ConnectionRefusedError` during scale-down means the `preStop` sleep in the Deployment is missing.
 - **HPA scales up but a few pods do most of the work:** the load generator is reusing connections. Each request must open a new one (`Connection: close` in `ramp.py`).
