@@ -19,8 +19,10 @@ The cooldown runs at IDLE req/s, so you can watch the autoscaler scale down.
 """
 
 import os
+import random
+import time
 
-from locust import FastHttpUser, LoadTestShape, constant_throughput, task
+from locust import FastHttpUser, LoadTestShape, task
 
 TICK = 15  # seconds per simulator tick
 PATTERN = 80 * TICK  # 1200 s: the timeline rate(t) is written for
@@ -36,7 +38,7 @@ RECONNECT_EVERY = 10  # requests (~10 s) per connection
 
 
 class AppUser(FastHttpUser):
-    """Sends 1 request/s, reconnecting every RECONNECT_EVERY requests.
+    """Sends 1 request/s on average, reconnecting every RECONNECT_EVERY requests.
 
     Why reconnect at all: Kubernetes picks a pod per *connection*, so with
     plain keep-alive each user stays on whichever pod it first hit. Early
@@ -49,13 +51,25 @@ class AppUser(FastHttpUser):
     latency jumped from ~100 ms to ~1.1 s even on idle pods.
     """
 
-    wait_time = constant_throughput(1)  # 1 request/s per user
+    def wait_time(self):
+        """Random gap, averaging 1 request/s per user.
+
+        Not constant_throughput(1): that keeps every user exactly 1 s apart,
+        and since Locust starts users within a fraction of a second, they all
+        fired in one clump each second. Pods then worked through the clump
+        one request at a time: at 50 req/s on 2 idle pods, median latency was
+        62 ms instead of 5 ms. Exponential gaps are how independent users
+        arrive. Like constant_throughput, the time the request took is
+        subtracted, so slow responses don't lower the rate.
+        """
+        return max(0.0, random.expovariate(1.0) - (time.monotonic() - self.started))
 
     def on_start(self):
         self.sent = 0
 
     @task
     def work(self):
+        self.started = time.monotonic()
         self.sent += 1
         if self.sent % RECONNECT_EVERY == 0:
             # Server closes the connection after this reply; the next

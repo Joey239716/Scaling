@@ -182,7 +182,7 @@ High latency (median ~1 s at only ~60% CPU) had three causes, found while adding
 
 Same test before and after (10 fixed pods, steady 300 req/s): median latency 1100 ms → 74 ms, worst case 7.7 s → 0.6 s, 247 → 299.5 req/s delivered, 0 failures.
 
-**Open question:** Locust reports a median of ~60–75 ms even at light load, while single `curl` requests from inside the cluster take ~6 ms. It's the same in every run, so it doesn't bias HPA vs KEDA comparisons, but absolute latencies are probably inflated by the load generator.
+**Fixed 2026-11-15: the ~60 ms latency floor came from the load generator.** Locust reported a median of ~60–75 ms even at light load, while single requests took ~5 ms. The cause was `constant_throughput(1)`: Locust starts users within a fraction of a second and that wait time keeps each one exactly 1 s apart, so every user fired in the same clump each second and pods worked through it one request at a time. `AppUser` now waits a random (exponential) gap averaging 1 s, the way independent users arrive. At 50 req/s on 2 pods the median went from 62 ms to 5 ms, and at 300 req/s on 10 pods from 74 ms to 5 ms, with the same request rates and 0 failures. Latencies from runs before this fix (including the smoke tests above) are inflated.
 
 ## Troubleshooting
 
