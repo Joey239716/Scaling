@@ -5,7 +5,7 @@
     python cloud-env/run_experiment.py --workload spike --autoscaler hpa --long
 
 Runs are short by default: the 20-minute pattern played 4x faster, plus a
-3-minute cooldown (8 min), with both autoscalers' scale-down wait cut from
+2-minute cooldown (7 min), with both autoscalers' scale-down wait cut from
 5 minutes to 1 so the cooldown shows it. --long plays the pattern in real
 time with the default 5-minute wait (27.5 min).
 
@@ -43,11 +43,12 @@ HERE = Path(__file__).resolve().parent
 WORKLOADS = ["ramp", "spike", "periodic", "bursty", "step", "smoke"]
 SAMPLE_EVERY = 15  # seconds, same as the HPA sync period
 START_REPLICAS = 2
+IDLE_BEFORE_RUN = 30  # seconds: 2 metrics refreshes, so CPU and req/s read idle
 # The HPA object each autoscaler creates (KEDA makes its own).
 HPA_NAME = {"hpa": "scale-app", "keda": "keda-hpa-scale-app"}
 # Seconds the autoscaler waits after load drops before removing pods.
 # 300 is the Kubernetes default (and what the manifests say); short runs use
-# 60 so scale-down fits in their 3-minute cooldown. Same value for both.
+# 60 so scale-down fits in their 2-minute cooldown. Same value for both.
 SCALE_DOWN_WAIT = {"short": 60, "long": 300}
 
 KUBECTL: list[str] = ["kubectl"]
@@ -106,10 +107,10 @@ def reset_cluster(autoscaler: str, scale_down_wait: int) -> None:
     kubectl("delete", "scaledobject", "scale-app", "--ignore-not-found", check=False)
     kubectl("delete", "hpa", "scale-app", "keda-hpa-scale-app", "--ignore-not-found")
 
-    log(f"scaling to {START_REPLICAS} pods and letting them idle for 60 s")
+    log(f"scaling to {START_REPLICAS} pods and letting them idle for {IDLE_BEFORE_RUN} s")
     kubectl("scale", "deployment/scale-app", f"--replicas={START_REPLICAS}")
     kubectl("rollout", "status", "deployment/scale-app", "--timeout=180s")
-    time.sleep(60)  # so the first metrics the autoscaler sees are idle ones
+    time.sleep(IDLE_BEFORE_RUN)  # so the first metrics the autoscaler sees are idle ones
 
     kubectl("apply", "-f", "-", stdin=autoscaler_manifest(autoscaler, scale_down_wait))
     for _ in range(30):  # wait until the autoscaler's HPA object exists
@@ -216,7 +217,7 @@ def main() -> None:
     parser.add_argument("--autoscaler", required=True, choices=["hpa", "keda"])
     parser.add_argument("--long", action="store_true",
                         help="27.5-min run with the default 5-min scale-down wait "
-                             "(default: 8-min run, 1-min wait)")
+                             "(default: 7-min run, 1-min wait)")
     parser.add_argument("--seed", type=int, default=42, help="bursty.py's seed")
     parser.add_argument("--kubectl", default="kubectl",
                         help='kubectl command, e.g. "minikube kubectl --"')

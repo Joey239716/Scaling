@@ -52,13 +52,13 @@ Both survive `minikube stop`/`start`.
 ```bash
 python cloud-env/run_experiment.py --workload spike --autoscaler hpa
 python cloud-env/run_experiment.py --workload spike --autoscaler keda
-# full-length version (27.5 min instead of 8):
+# full-length version (27.5 min instead of 7):
 python cloud-env/run_experiment.py --workload spike --autoscaler keda --long
 # if your kubectl is too old for the cluster:
 python cloud-env/run_experiment.py --workload spike --autoscaler keda --kubectl "minikube kubectl --"
 ```
 
-Workloads: `ramp`, `spike`, `periodic`, `bursty`, `step` (8 min each, or 27.5 with `--long`), and `smoke` (5 min, for checking a setup works). With the ~1.5 min reset before each run, all 10 short runs (5 workloads × 2 autoscalers) take about 1.6 hours. Needs `pyyaml` (in the repo's `requirements.txt`). It also sets metrics-server to a 15 s refresh if it isn't already, because Minikube resets it on restart.
+Workloads: `ramp`, `spike`, `periodic`, `bursty`, `step` (7 min each, or 27.5 with `--long`), and `smoke` (5 min, for checking a setup works). With the ~1 min reset before each run, all 10 short runs (5 workloads × 2 autoscalers) take about 1.3 hours. Needs `pyyaml` (in the repo's `requirements.txt`). It also sets metrics-server to a 15 s refresh if it isn't already, because Minikube resets it on restart.
 
 Each run writes `cloud-env/results/<time>_<workload>_<autoscaler>/` (with `_long` on the end for `--long` runs):
 
@@ -93,7 +93,7 @@ Every workload is written as a 20-minute pattern (the simulator's 80 ticks), fol
 
 | | Pattern | Cooldown | Total | Scale-down wait |
 |---|---|---|---|---|
-| **short** (default) | played 4× faster: 5 min | 3 min | **8 min** | 1 min (set by `run_experiment.py`) |
+| **short** (default) | played 4× faster: 5 min | 2 min | **7 min** | 1 min (set by `run_experiment.py`) |
 | **long** (`--long`) | real time: 20 min | 7.5 min | **27.5 min** | 5 min (Kubernetes default) |
 
 Short runs are for quick comparisons; their scale-down wait is cut to 1 minute for both autoscalers so it fits in the cooldown. Use `--long` for results that match the simulator's timing and Kubernetes's defaults. The times in the table below are on the 20-minute timeline; divide by 4 for a short run.
@@ -125,7 +125,7 @@ kubectl rollout status deployment/scale-app
 
 After a rebuild with the same tag, run `kubectl rollout restart deployment/scale-app` so the pods pick up the new image.
 
-**2. Run a workload** (8 minutes; set `RUN_LENGTH: long` in the Job for 27.5). First pick one by setting `WORKLOAD` in `cloud-env/workloads/locust-job.yaml` (default `ramp.py`). The manifests keep the 5-minute scale-down wait, so a short run by hand ends before HPA scales down. Then:
+**2. Run a workload** (7 minutes; set `RUN_LENGTH: long` in the Job for 27.5). First pick one by setting `WORKLOAD` in `cloud-env/workloads/locust-job.yaml` (default `ramp.py`). The manifests keep the 5-minute scale-down wait, so a short run by hand ends before HPA scales down. Then:
 
 ```bash
 kubectl create configmap workloads --from-file=cloud-env/workloads/

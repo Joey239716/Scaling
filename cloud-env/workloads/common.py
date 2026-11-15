@@ -9,7 +9,7 @@ Each workload writes rate(t) for a 20-minute pattern (the simulator's 80
 ticks of 15 s). RUN_LENGTH (env var, set by run_experiment.py) picks how
 fast that pattern is played:
 
-  short (default)  4x faster: 5-min pattern + 3-min cooldown = 8 min.
+  short (default)  4x faster: 5-min pattern + 2-min cooldown = 7 min.
                    run_experiment.py shortens the autoscalers' scale-down
                    wait from 5 min to 1 min to match.
   long             real time: 20-min pattern + 7.5-min cooldown = 27.5 min,
@@ -28,7 +28,7 @@ PATTERN = 80 * TICK  # 1200 s: the timeline rate(t) is written for
 LONG = os.environ.get("RUN_LENGTH", "short") == "long"
 SPEED = 1 if LONG else 4  # pattern seconds played per real second
 PATTERN_END = PATTERN / SPEED  # real seconds: 1200 long, 300 short
-COOLDOWN_END = PATTERN_END + (450 if LONG else 180)  # 1650 long, 480 short
+COOLDOWN_END = PATTERN_END + (450 if LONG else 120)  # 1650 long, 420 short
 IDLE = 20  # req/s during cooldown
 
 

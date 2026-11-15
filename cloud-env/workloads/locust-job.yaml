@@ -24,7 +24,7 @@ spec:
               value: manual
             - name: BURST_SEED  # only used by bursty.py
               value: "42"
-            - name: RUN_LENGTH  # short (8 min) or long (27.5 min); see common.py
+            - name: RUN_LENGTH  # short (7 min) or long (27.5 min); see common.py
               value: short
           args: ["-f", "/mnt/locust/$(WORKLOAD)", "--headless", "--host", "http://scale-app",
                  "--print-stats", "--csv", "/results/$(RUN_ID)", "--csv-full-history"]
