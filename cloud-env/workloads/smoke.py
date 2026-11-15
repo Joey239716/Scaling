@@ -1,7 +1,8 @@
-"""Smoke test: 5 minutes, to check a setup works before a 27.5-minute run.
+"""Smoke test: 5 minutes, to check a setup works before a real run.
 
 100 -> 300 req/s over 2 minutes, hold 3 minutes, stop. Should scale from
-2 to ~10 pods. Not for results: it has no cooldown and no simulator twin.
+2 to ~10 pods. Not for results: it has no cooldown and no simulator twin. Ignores
+RUN_LENGTH.
 """
 
 from locust import LoadTestShape

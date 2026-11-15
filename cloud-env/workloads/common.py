@@ -5,16 +5,30 @@ user sends 1 request/s, "users" and "req/s" are the same number throughout.
 (That holds while responses take under 1 s; slower responses mean each user
 sends less, so the real rate drops below the target.)
 
-Every workload follows the same timeline, matching the simulator:
-  0 - 20:00     the pattern itself (80 ticks x 15 s)
-  20:00 - 27:30 cooldown at IDLE req/s, to watch HPA's 5-minute scale-down
+Each workload writes rate(t) for a 20-minute pattern (the simulator's 80
+ticks of 15 s). RUN_LENGTH (env var, set by run_experiment.py) picks how
+fast that pattern is played:
+
+  short (default)  4x faster: 5-min pattern + 3-min cooldown = 8 min.
+                   run_experiment.py shortens the autoscalers' scale-down
+                   wait from 5 min to 1 min to match.
+  long             real time: 20-min pattern + 7.5-min cooldown = 27.5 min,
+                   with the default 5-min scale-down wait.
+
+The cooldown runs at IDLE req/s, so you can watch the autoscaler scale down.
 """
+
+import os
 
 from locust import FastHttpUser, LoadTestShape, constant_throughput, task
 
 TICK = 15  # seconds per simulator tick
-PATTERN_END = 80 * TICK  # 1200 s
-COOLDOWN_END = PATTERN_END + 450  # 1650 s
+PATTERN = 80 * TICK  # 1200 s: the timeline rate(t) is written for
+
+LONG = os.environ.get("RUN_LENGTH", "short") == "long"
+SPEED = 1 if LONG else 4  # pattern seconds played per real second
+PATTERN_END = PATTERN / SPEED  # real seconds: 1200 long, 300 short
+COOLDOWN_END = PATTERN_END + (450 if LONG else 180)  # 1650 long, 480 short
 IDLE = 20  # req/s during cooldown
 
 
@@ -52,9 +66,10 @@ class AppUser(FastHttpUser):
 
 
 class RateShape(LoadTestShape):
-    """Base class: subclasses implement rate(t) -> req/s for 0 <= t < PATTERN_END.
+    """Base class: subclasses implement rate(t) -> req/s for 0 <= t < PATTERN,
+    with t on the 20-minute timeline even in a short run.
 
-    Handles the cooldown and stopping, so each workload file only describes
+    Handles the speed-up, the cooldown and stopping, so each workload file only describes
     its pattern. Import this module as `import common` and subclass
     `common.RateShape`, so Locust doesn't see this base class as a second shape.
     """
@@ -67,7 +82,7 @@ class RateShape(LoadTestShape):
     def tick(self):
         t = self.get_run_time()
         if t < PATTERN_END:
-            users = self.rate(t)
+            users = self.rate(t * SPEED)
         elif t < COOLDOWN_END:
             users = IDLE
         else:

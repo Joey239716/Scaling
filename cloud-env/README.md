@@ -52,13 +52,15 @@ Both survive `minikube stop`/`start`.
 ```bash
 python cloud-env/run_experiment.py --workload spike --autoscaler hpa
 python cloud-env/run_experiment.py --workload spike --autoscaler keda
+# full-length version (27.5 min instead of 8):
+python cloud-env/run_experiment.py --workload spike --autoscaler keda --long
 # if your kubectl is too old for the cluster:
 python cloud-env/run_experiment.py --workload spike --autoscaler keda --kubectl "minikube kubectl --"
 ```
 
-Workloads: `ramp`, `spike`, `periodic`, `bursty`, `step` (27.5 min each), and `smoke` (5 min, for checking a setup works). Needs `pyyaml` (in the repo's `requirements.txt`). It also sets metrics-server to a 15 s refresh if it isn't already, because Minikube resets it on restart.
+Workloads: `ramp`, `spike`, `periodic`, `bursty`, `step` (8 min each, or 27.5 with `--long`), and `smoke` (5 min, for checking a setup works). With the ~1.5 min reset before each run, all 10 short runs (5 workloads × 2 autoscalers) take about 1.6 hours. Needs `pyyaml` (in the repo's `requirements.txt`). It also sets metrics-server to a 15 s refresh if it isn't already, because Minikube resets it on restart.
 
-Each run writes `cloud-env/results/<time>_<workload>_<autoscaler>/`:
+Each run writes `cloud-env/results/<time>_<workload>_<autoscaler>/` (with `_long` on the end for `--long` runs):
 
 | File | Contents |
 |---|---|
@@ -66,7 +68,7 @@ Each run writes `cloud-env/results/<time>_<workload>_<autoscaler>/`:
 | `locust_stats_history.csv` | Locust's req/s, response times and failures over time |
 | `locust_stats.csv`, `locust_failures.csv` | Run totals and any errors |
 | `locust.log` | Locust's console output (includes `bursty.py`'s burst schedule) |
-| `run.json` | Workload, autoscaler, seed, git commit, start/end times |
+| `run.json` | Workload, autoscaler, length, scale-down wait, seed, git commit, start/end times |
 
 Copying Locust's CSVs off the cluster uses `minikube cp`; on kind, copy `/data/results` out of the node container yourself.
 
@@ -87,7 +89,14 @@ Known differences:
 
 ## Workloads
 
-Every workload runs a 20-minute pattern (the simulator's 80 ticks), then 7.5 minutes at 20 req/s so you can watch HPA's 5-minute scale-down, then stops: **27.5 minutes each**. Each simulated user sends 1 request/s, so users = req/s.
+Every workload is written as a 20-minute pattern (the simulator's 80 ticks), followed by a cooldown at 20 req/s so you can watch the autoscaler scale down. Each simulated user sends 1 request/s, so users = req/s. `RUN_LENGTH` (set by `run_experiment.py`) picks the speed:
+
+| | Pattern | Cooldown | Total | Scale-down wait |
+|---|---|---|---|---|
+| **short** (default) | played 4× faster: 5 min | 3 min | **8 min** | 1 min (set by `run_experiment.py`) |
+| **long** (`--long`) | real time: 20 min | 7.5 min | **27.5 min** | 5 min (Kubernetes default) |
+
+Short runs are for quick comparisons; their scale-down wait is cut to 1 minute for both autoscalers so it fits in the cooldown. Use `--long` for results that match the simulator's timing and Kubernetes's defaults. The times in the table below are on the 20-minute timeline; divide by 4 for a short run.
 
 | File | Pattern (first 20 min) | What it tests | Simulator twin |
 |---|---|---|---|
@@ -116,7 +125,7 @@ kubectl rollout status deployment/scale-app
 
 After a rebuild with the same tag, run `kubectl rollout restart deployment/scale-app` so the pods pick up the new image.
 
-**2. Run a workload** (27.5 minutes). First pick one by setting `WORKLOAD` in `cloud-env/workloads/locust-job.yaml` (default `ramp.py`). Then:
+**2. Run a workload** (8 minutes; set `RUN_LENGTH: long` in the Job for 27.5). First pick one by setting `WORKLOAD` in `cloud-env/workloads/locust-job.yaml` (default `ramp.py`). The manifests keep the 5-minute scale-down wait, so a short run by hand ends before HPA scales down. Then:
 
 ```bash
 kubectl create configmap workloads --from-file=cloud-env/workloads/
@@ -132,7 +141,7 @@ The ConfigMap holds the whole folder, because each workload imports `common.py`.
 kubectl get hpa -w      # HPA's is "scale-app"; KEDA's is "keda-hpa-scale-app"
 ```
 
-At the 60% target each pod takes ~30 req/s, so expect roughly `req/s ÷ 30` replicas: ~17 at 500 req/s. Scale-down starts about 5 minutes after load drops.
+At the 60% target each pod takes ~30 req/s, so expect roughly `req/s ÷ 30` replicas: ~17 at 500 req/s. Scale-down starts about 5 minutes after load drops (1 minute in a short `run_experiment.py` run).
 
 **Run it again, or switch workload:** delete the old Job and ConfigMap first. A Job runs once, and the ConfigMap must be recreated to pick up edited scripts:
 

@@ -3,8 +3,8 @@
 # Needs the workloads ConfigMap first -- see cloud-env/README.md.
 #
 # Normally started by cloud-env/run_experiment.py, which fills in WORKLOAD
-# and RUN_ID. To run by hand, change WORKLOAD below: ramp.py, spike.py,
-# periodic.py, bursty.py, step.py or smoke.py.
+# RUN_ID and RUN_LENGTH. To run by hand, change WORKLOAD below: ramp.py,
+# spike.py, periodic.py, bursty.py, step.py or smoke.py.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -24,6 +24,8 @@ spec:
               value: manual
             - name: BURST_SEED  # only used by bursty.py
               value: "42"
+            - name: RUN_LENGTH  # short (8 min) or long (27.5 min); see common.py
+              value: short
           args: ["-f", "/mnt/locust/$(WORKLOAD)", "--headless", "--host", "http://scale-app",
                  "--print-stats", "--csv", "/results/$(RUN_ID)", "--csv-full-history"]
           securityContext:

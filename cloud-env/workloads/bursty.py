@@ -7,14 +7,16 @@ or flaps up and down.
 The bursts are random but repeatable: the same seed gives the same bursts
 every run, so different controllers face identical traffic. Change it with
 the BURST_SEED environment variable (default 42). The schedule is printed at
-startup.
+startup, in 20-minute-timeline seconds; a short run plays it 4x faster, so
+bursts last 8-23 s and come 15-45 s apart (shorter than a new pod takes to
+help: the autoscaler can only over-react).
 """
 
 import os
 import random
 
 import common
-from common import PATTERN_END, AppUser  # noqa: F401  (Locust finds AppUser here)
+from common import PATTERN, AppUser  # noqa: F401  (Locust finds AppUser here)
 
 BASE = 100
 SEED = int(os.environ.get("BURST_SEED", "42"))
@@ -27,7 +29,7 @@ def make_bursts(seed):
     t = 60  # one quiet minute first
     while True:
         duration = rng.randint(30, 90)
-        if t + duration > PATTERN_END:
+        if t + duration > PATTERN:
             break
         bursts.append((t, t + duration, rng.randint(250, 500)))
         t += duration + rng.randint(60, 180)

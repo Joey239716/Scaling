@@ -2,6 +2,12 @@
 
     python cloud-env/run_experiment.py --workload spike --autoscaler keda
     python cloud-env/run_experiment.py --workload spike --autoscaler hpa
+    python cloud-env/run_experiment.py --workload spike --autoscaler hpa --long
+
+Runs are short by default: the 20-minute pattern played 4x faster, plus a
+3-minute cooldown (8 min), with both autoscalers' scale-down wait cut from
+5 minutes to 1 so the cooldown shows it. --long plays the pattern in real
+time with the default 5-minute wait (27.5 min).
 
 Every run starts from the same state (2 idle pods, fresh autoscaler), so HPA
 and KEDA runs of the same workload are directly comparable. Results go to
@@ -11,7 +17,8 @@ cloud-env/results/<time>_<workload>_<autoscaler>/:
                         and the metric it saw (CPU % for HPA, req/s per pod for KEDA)
     locust_*.csv        Locust's own request rate / latency stats
     locust.log          Locust's console output (bursty's schedule, errors)
-    run.json            what was run: workload, autoscaler, seed, git commit, times
+    run.json            what was run: workload, autoscaler, length, seed,
+                        scale-down wait, git commit, times
 
 Needs the setup in cloud-env/README.md (app deployed; for KEDA, Prometheus and
 KEDA installed). If your kubectl doesn't match the cluster version, pass
@@ -38,6 +45,10 @@ SAMPLE_EVERY = 15  # seconds, same as the HPA sync period
 START_REPLICAS = 2
 # The HPA object each autoscaler creates (KEDA makes its own).
 HPA_NAME = {"hpa": "scale-app", "keda": "keda-hpa-scale-app"}
+# Seconds the autoscaler waits after load drops before removing pods.
+# 300 is the Kubernetes default (and what the manifests say); short runs use
+# 60 so scale-down fits in their 3-minute cooldown. Same value for both.
+SCALE_DOWN_WAIT = {"short": 60, "long": 300}
 
 KUBECTL: list[str] = ["kubectl"]
 
@@ -76,7 +87,19 @@ def check_metrics_resolution() -> None:
             kubectl("-n", "kube-system", "rollout", "status", "deploy/metrics-server")
 
 
-def reset_cluster(autoscaler: str) -> None:
+def autoscaler_manifest(autoscaler: str, scale_down_wait: int) -> str:
+    """The autoscaler's manifest, with its scale-down wait set."""
+    if autoscaler == "hpa":
+        doc = yaml.safe_load((HERE / "k8s" / "hpa.yaml").read_text())
+        behavior = doc["spec"]["behavior"]
+    else:
+        doc = yaml.safe_load((HERE / "keda" / "scaledobject.yaml").read_text())
+        behavior = doc["spec"]["advanced"]["horizontalPodAutoscalerConfig"]["behavior"]
+    behavior["scaleDown"]["stabilizationWindowSeconds"] = scale_down_wait
+    return yaml.safe_dump(doc)
+
+
+def reset_cluster(autoscaler: str, scale_down_wait: int) -> None:
     """Remove any running test and autoscaler, then start from 2 idle pods."""
     log("resetting: removing old Locust job and both autoscalers")
     kubectl("delete", "job", "locust-run", "--ignore-not-found", "--wait=true")
@@ -88,31 +111,29 @@ def reset_cluster(autoscaler: str) -> None:
     kubectl("rollout", "status", "deployment/scale-app", "--timeout=180s")
     time.sleep(60)  # so the first metrics the autoscaler sees are idle ones
 
-    if autoscaler == "hpa":
-        kubectl("apply", "-f", str(HERE / "k8s" / "hpa.yaml"))
-    else:
-        kubectl("apply", "-f", str(HERE / "keda" / "scaledobject.yaml"))
+    kubectl("apply", "-f", "-", stdin=autoscaler_manifest(autoscaler, scale_down_wait))
     for _ in range(30):  # wait until the autoscaler's HPA object exists
         if kubectl("get", "hpa", HPA_NAME[autoscaler], "--ignore-not-found"):
             break
         time.sleep(2)
     else:
         sys.exit(f"{HPA_NAME[autoscaler]} was never created -- is KEDA installed?")
-    log(f"{autoscaler} is active")
+    log(f"{autoscaler} is active (scale-down wait {scale_down_wait} s)")
 
 
-def start_locust(workload: str, run_id: str, seed: int) -> None:
+def start_locust(workload: str, run_id: str, seed: int, length: str) -> None:
     """Load the workload scripts into a ConfigMap and start the Locust Job."""
     kubectl("delete", "configmap", "workloads", "--ignore-not-found")
     kubectl("create", "configmap", "workloads", f"--from-file={HERE / 'workloads'}")
 
     job = yaml.safe_load((HERE / "workloads" / "locust-job.yaml").read_text())
     env = job["spec"]["template"]["spec"]["containers"][0]["env"]
-    values = {"WORKLOAD": f"{workload}.py", "RUN_ID": run_id, "BURST_SEED": str(seed)}
+    values = {"WORKLOAD": f"{workload}.py", "RUN_ID": run_id,
+              "BURST_SEED": str(seed), "RUN_LENGTH": length}
     for var in env:
         var["value"] = values[var["name"]]
     kubectl("create", "-f", "-", stdin=yaml.safe_dump(job))
-    log(f"Locust started: {workload}.py")
+    log(f"Locust started: {workload}.py ({length})")
 
 
 # --- recording --------------------------------------------------------------
@@ -193,23 +214,31 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--workload", required=True, choices=WORKLOADS)
     parser.add_argument("--autoscaler", required=True, choices=["hpa", "keda"])
+    parser.add_argument("--long", action="store_true",
+                        help="27.5-min run with the default 5-min scale-down wait "
+                             "(default: 8-min run, 1-min wait)")
     parser.add_argument("--seed", type=int, default=42, help="bursty.py's seed")
     parser.add_argument("--kubectl", default="kubectl",
                         help='kubectl command, e.g. "minikube kubectl --"')
     args = parser.parse_args()
     KUBECTL = shlex.split(args.kubectl)
+    length = "long" if args.long else "short"
+    scale_down_wait = SCALE_DOWN_WAIT[length]
 
     run_id = f"{datetime.now():%Y%m%d-%H%M%S}_{args.workload}_{args.autoscaler}"
+    if args.long:
+        run_id += "_long"
     out = HERE / "results" / run_id
     out.mkdir(parents=True)
     commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                             capture_output=True, text=True).stdout.strip()
     meta = {"workload": args.workload, "autoscaler": args.autoscaler,
+            "length": length, "scale_down_wait_s": scale_down_wait,
             "seed": args.seed, "git_commit": commit, "started": datetime.now().isoformat()}
 
     check_metrics_resolution()
-    reset_cluster(args.autoscaler)
-    start_locust(args.workload, run_id, args.seed)
+    reset_cluster(args.autoscaler, scale_down_wait)
+    start_locust(args.workload, run_id, args.seed, length)
     meta["locust_result"] = record(args.autoscaler, out)
     meta["finished"] = datetime.now().isoformat()
     collect_locust_files(run_id, out)
