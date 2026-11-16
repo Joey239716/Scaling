@@ -33,3 +33,6 @@ locust_reports/
 # Simulator outputs (Camp QMIND): results and the LLM response cache
 experiments/results/
 experiments/cache/
+
+# Cluster experiment runner: the background controller's process id
+experiments/.controller.pid

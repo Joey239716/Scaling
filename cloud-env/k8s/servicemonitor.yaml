@@ -1,0 +1,17 @@
+# Tells Prometheus (kube-prometheus-stack) to scrape every scale-app pod's
+# /metrics every 15 s. Needs the Prometheus CRDs, so apply it after Prometheus.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: scale-app
+  namespace: scale
+  labels:
+    app.kubernetes.io/name: scale-app
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scale-app
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

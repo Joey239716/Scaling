@@ -1,0 +1,18 @@
+# One stable address in front of all ready pods. NodePort so Locust (on the host)
+# can reach it through `minikube service`, which balances connections across pods.
+# Don't use `kubectl port-forward svc/scale-app` for load: it sends everything to ONE pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: scale-app
+  namespace: scale
+  labels:
+    app.kubernetes.io/name: scale-app
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: scale-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

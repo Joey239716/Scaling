@@ -1,0 +1,39 @@
+# Helm values for kube-prometheus-stack, used by scripts/setup_cluster.sh.
+# Trimmed for a laptop: no Grafana or Alertmanager, and no scraping of control
+# plane parts Minikube doesn't expose. What we keep:
+#   Prometheus          stores every metric (scraped every 15 s)
+#   kube-state-metrics  replica counts and CPU requests
+#   kubelet/cAdvisor    container CPU usage
+#   node-exporter       node CPU/memory (useful for checking the host isn't saturated)
+fullnameOverride: kps          # gives the service a fixed name: kps-prometheus
+
+grafana:
+  enabled: false
+alertmanager:
+  enabled: false
+defaultRules:
+  create: false
+
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+    retention: 7d
+    # Pick up ServiceMonitors from every namespace, not just ones labelled for this release.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        memory: 1536Mi

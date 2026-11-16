@@ -7,3 +7,7 @@ pandas>=2.0
 matplotlib>=3.8
 pyyaml>=6.0
 pytest>=8.0
+
+# Cluster experiments (experiments/run_experiment.py, telemetry/)
+locust>=2.30
+requests>=2.31
