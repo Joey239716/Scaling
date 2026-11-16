@@ -72,6 +72,14 @@ Each run writes `cloud-env/results/<time>_<workload>_<autoscaler>/` (with `_long
 
 Copying Locust's CSVs off the cluster uses `minikube cp`; on kind, copy `/data/results` out of the node container yourself.
 
+To compare runs, plot the newest HPA and KEDA run of each workload:
+
+```bash
+python cloud-env/plot_results.py
+```
+
+It writes `cloud-env/results/plots/<workload>_<length>.png` (traffic, ready pods and p95 latency over time, HPA and KEDA overlaid) and `cloud-env/results/summary.md` (one row per run: latency, failures, peak pods, and pod-minutes as the cost).
+
 ## How it lines up with the simulator
 
 | | Real cluster | Simulator / HPA baseline |
