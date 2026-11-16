@@ -1,0 +1,5 @@
+# Everything the experiments touch lives in this namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: scale

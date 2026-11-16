@@ -1,0 +1,47 @@
+# The app every controller scales. Controllers target it by these fixed values:
+#   namespace: scale    Deployment name: scale-app    label: app.kubernetes.io/name=scale-app
+# Don't change the resources below for one controller only: HPA and KEDA measure
+# CPU utilization as a percentage of the CPU *request*, so the same request is
+# what makes their results comparable. The experiment runner sets `replicas`
+# at the start of every run (--initial-replicas).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scale-app
+  namespace: scale
+  labels:
+    app.kubernetes.io/name: scale-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scale-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scale-app
+    spec:
+      containers:
+        - name: app
+          image: scale-app:v1
+          # Built locally inside Minikube (scripts/setup_cluster.sh); never pulled.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: WORK_ROUNDS # CPU cost of one /work request (~7 ms)
+              value: "20000"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # No traffic until the pod answers: the real startup delay.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
