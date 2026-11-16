@@ -1,134 +1,113 @@
 # Dev environment setup
 
-This gets you to the Phase 1 milestone: a containerized app running on a local Kubernetes cluster, scaled automatically by HPA under Locust-generated traffic. You do **not** need an AWS/Azure account for any of this — everything runs locally.
+This gets you a local Kubernetes cluster with everything the experiments need: the app
+we scale, metrics-server, Prometheus and KEDA. Then it runs your first experiment.
+Everything runs on your laptop; you don't need a cloud account.
 
-> **You build `cloud-env/` yourself before steps 5 and 6.**
-> Steps 1–4 (tools, cluster, metrics server) work as written. Steps 5 and 6 deploy and load-test an app that **doesn't exist yet**: `cloud-env/` currently holds only a README. Writing it is the core of this exercise. See [Your task: build `cloud-env/`](#your-task-build-cloud-env) below for what to build. Step 6 working is the definition of done.
+Everyone uses the **same setup script, versions and settings**, so results from different
+laptops and different controllers are comparable. Don't start your own cluster by hand for
+experiments.
 
-## 1. Install the tooling
+## 1. Install the tools
 
-| Tool | What it's for | Install |
-|---|---|---|
-| Docker | Containerize the app | [docs.docker.com/get-docker](https://docs.docker.com/get-docker/) |
-| kubectl | Talk to the Kubernetes cluster | [kubernetes.io/docs/tasks/tools](https://kubernetes.io/docs/tasks/tools/) |
-| Minikube *or* kind | Run Kubernetes locally | [minikube.sigs.k8s.io](https://minikube.sigs.k8s.io/docs/start/) or [kind.sigs.k8s.io](https://kind.sigs.k8s.io/docs/user/quick-start/) |
-| Python 3.11+ | The app and workload scripts | [python.org/downloads](https://www.python.org/downloads/) |
-| Locust | Workload generation | `pip install locust` |
+| Tool | What it's for | macOS (Homebrew) | Other |
+|---|---|---|---|
+| Docker Desktop | Runs Minikube's node and builds the app image | [docker.com](https://docs.docker.com/get-docker/) | same |
+| Minikube | Local Kubernetes | `brew install minikube` | [minikube.sigs.k8s.io](https://minikube.sigs.k8s.io/docs/start/) |
+| kubectl | Talk to the cluster | `brew install kubectl` | [kubernetes.io](https://kubernetes.io/docs/tasks/tools/) |
+| Helm | Installs Prometheus and KEDA | `brew install helm` | [helm.sh](https://helm.sh/docs/intro/install/) |
+| Python 3.11+ | Runner, telemetry, Locust | [python.org](https://www.python.org/downloads/) | same |
 
-If you're unsure whether to pick Minikube or kind: either is fine for Phase 1. Minikube has a friendlier UI/dashboard; kind starts faster and is closer to what CI systems usually use. Pick one and be consistent across the team so results are comparable.
+**Give Docker Desktop enough resources:** Settings → Resources, at least **6 CPUs and 8 GB of memory**.
+The cluster takes 4 CPUs and 6 GB; the rest is for Locust, which runs on your machine.
 
-## 2. Clone the repo
-
-```bash
-git clone https://github.com/<org>/SCALE.git
-cd SCALE
-```
-
-## 3. Start your local cluster
+## 2. Clone and install the Python packages
 
 ```bash
-# Minikube
-minikube start
-
-# or kind
-kind create cluster --name scale
+git clone https://github.com/daryanfadavi/Scaling.git
+cd Scaling
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt          # includes locust and requests
 ```
 
-Verify it's up:
+## 3. Bring up the cluster (one command)
 
 ```bash
-kubectl get nodes
+./scripts/setup_cluster.sh
 ```
 
-## 4. Enable the metrics server
+The first run takes about 10 minutes (downloads). It's safe to run again at any time: it only
+fixes what's missing, and it rebuilds and redeploys the app. It:
 
-HPA needs the metrics server to read CPU/memory usage.
+1. Starts Minikube (profile and kubectl context `scale`: 4 CPUs, 6 GB, Kubernetes v1.35.0).
+2. Enables metrics-server (what HPA reads CPU from).
+3. Installs Prometheus (kube-prometheus-stack chart 93.3.0, namespace `monitoring`).
+4. Installs KEDA (chart 2.21.0, namespace `keda`).
+5. Builds the app image `scale-app:v1` inside Minikube and deploys it (namespace `scale`).
+6. Checks that each part is healthy and prints a summary ending in `Cluster ready.`
+
+The settings are variables at the top of the script. **Don't change them for your own runs**:
+results are only comparable on the same cluster settings. Every run's `metadata.json` records them.
+
+## 4. Run your first experiment
 
 ```bash
-# Minikube
-minikube addons enable metrics-server
-
-# kind
-kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-kubectl -n kube-system patch deployment metrics-server --type=json \
-  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+python experiments/run_experiment.py --controller hpa --scenario gradual_ramp --duration 180
 ```
 
-**kind needs that second command.** kind's nodes use self-signed certificates, so without `--kubelet-insecure-tls` the metrics server stays at `0/1` ready and its logs show `x509: cannot validate certificate`. This flag is fine for a local cluster; never use it on a real one.
-
-Check it works (give it a minute):
+It takes about 5 minutes. Watch the scaling while it runs, from another terminal:
 
 ```bash
-kubectl top nodes
+kubectl --context scale -n scale get hpa -w
 ```
 
-## Your task: build `cloud-env/`
+When it finishes, look in `experiments/results/gradual_ramp/hpa/repeat_1/`. `metrics.csv` has one
+row per 15 s; `replicas_desired` should go up as the load ramps. See
+[experiments/README.md](../../experiments/README.md) for everything the runner does, and
+[docs/telemetry.md](../telemetry.md) for what each column means.
 
-Everything from here on needs these files, which you write. Keep it small: the whole thing is roughly 100–150 lines.
+## 5. Plug in your controller
 
-| Path | What it is | Requirements |
-|---|---|---|
-| `cloud-env/app/` | The service we scale, plus its `Dockerfile` | A web app (FastAPI is suggested) with a cheap health endpoint, and an endpoint where **every request burns a fixed, small amount of CPU** (a few milliseconds). That makes "more requests" mean "more CPU", which is what HPA scales on. |
-| `cloud-env/k8s/` | Deployment, Service and HPA manifests | **Deployment:** must set `resources.requests.cpu` (see the traps below); a readiness probe on the health endpoint is recommended. **Service:** in front of the pods. **HPA:** `autoscaling/v2`, **60% CPU target** to match our simulator's HPA baseline, sensible min/max replicas. |
-| `cloud-env/workloads/ramp.py` | A Locust workload | Traffic that ramps up gradually, holds, then drops, so you can see HPA scale up and then back down. Locust's `LoadTestShape` class is the tool for this. |
-| a way to run Locust **inside** the cluster | See step 6 | e.g. a Pod using the official `locustio/locust` image, with `ramp.py` mounted from a ConfigMap. |
-| `cloud-env/README.md` | How to run it | Update it with the exact commands, so the next person can reproduce your run. |
+KEDA, PHPA and the LLM controller are plugins in `controllers/<name>/`. The contract (what files to
+add, what the runner does with them, and the fairness rules) is in
+[controllers/README.md](../../controllers/README.md). Each plugin folder's README has specific notes.
 
-Three traps everyone hits:
+## The app and cluster at a glance
 
-1. **No CPU request means no autoscaling.** HPA measures utilization as a percentage of each container's CPU *request*. Without `resources.requests.cpu` in the Deployment, `kubectl get hpa` shows `<unknown>` forever.
-2. **Your image only exists on your laptop.** The cluster can't download `scale-app:local` from anywhere, so load it into the cluster (step 5) or the pods sit in `ErrImagePull`. Use a real tag like `:local`: with `:latest` (or no tag), Kubernetes tries to download the image every time unless you also set `imagePullPolicy: IfNotPresent`.
-3. **`kubectl port-forward` sends all traffic to one pod**, even when you point it at a Service. Fine for a quick `curl`, useless for a load test: the pods HPA adds would never get any traffic. That's why Locust has to run inside the cluster (step 6).
+| What | Value |
+|---|---|
+| kubectl context | `scale` |
+| Namespace / Deployment / Service | `scale` / `scale-app` / `scale-app` (NodePort) |
+| Pod label | `app.kubernetes.io/name=scale-app` |
+| Image | `scale-app:v1` (built locally, never pulled) |
+| CPU request / limit | 100m / 500m |
+| Memory request / limit | 128Mi / 256Mi |
+| Replica bounds for every controller | 1 to 10 |
+| Prometheus | `kps-prometheus.monitoring.svc:9090` (in cluster) |
 
-## 5. Build and deploy the test app
+Details: [cloud-env/README.md](../../cloud-env/README.md).
 
-*Needs `cloud-env/app/` and `cloud-env/k8s/` from [your task](#your-task-build-cloud-env).*
+## Teardown
 
 ```bash
-docker build -t scale-app:local ./cloud-env/app
-
-# Make the image available inside the cluster:
-kind load docker-image scale-app:local --name scale   # kind
-minikube image load scale-app:local                   # or Minikube
-
-kubectl apply -f cloud-env/k8s/
-kubectl get pods -w
+./scripts/teardown_cluster.sh      # deletes the cluster; results in experiments/results/ stay
 ```
-
-Quick check that the app answers (this one is fine through port-forward):
-
-```bash
-kubectl port-forward svc/scale-app 8080:80   # then, in another terminal:
-curl localhost:8080/healthz
-```
-
-## 6. Generate load and watch it scale
-
-*Needs `cloud-env/workloads/` from [your task](#your-task-build-cloud-env).*
-
-Run Locust **inside the cluster**, pointed at the Service's in-cluster address (`http://scale-app`), so requests are spread across every pod. Running it on your laptop through `port-forward` won't work (trap 3 above). One way: put `ramp.py` in a ConfigMap and start a Pod from the `locustio/locust` image that mounts it:
-
-```bash
-kubectl create configmap locustfile --from-file=cloud-env/workloads/ramp.py
-kubectl apply -f <your Locust Pod manifest>
-kubectl logs -f <locust pod>      # live request stats
-```
-
-Then in another terminal:
-
-```bash
-kubectl get hpa -w
-```
-
-You should see replica count increase as load ramps up, and decrease again once it drops — that's the Phase 1 milestone. Scaling down is deliberately slow: HPA waits 5 minutes after load drops (its stabilization window, the same one our simulator models).
 
 ## Troubleshooting
 
-- **Pods stuck in `Pending`:** usually a resource request issue — check `kubectl describe pod <name>` for scheduling errors.
-- **Pods stuck in `ErrImagePull` / `ImagePullBackOff`:** the cluster is trying to download your local image. Load it into the cluster (step 5); if you tagged it `:latest`, also set `imagePullPolicy: IfNotPresent`.
-- **HPA shows `<unknown>` for targets:** either your Deployment has no `resources.requests.cpu`, or the metrics server isn't ready. Check `kubectl top pods`: if that errors, it's the metrics server (on kind, see step 4).
-- **Metrics server stuck at `0/1` on kind:** the `--kubelet-insecure-tls` patch in step 4 is missing.
-- **HPA adds pods but only one is busy:** you're sending load through `kubectl port-forward`. Run Locust inside the cluster (step 6).
-- **Can't reach the service for a quick check:** `kubectl port-forward svc/<name> 8080:80` (kind) or `minikube service <name> --url` (Minikube).
+- **`Docker isn't running`:** start Docker Desktop, wait for it to be ready, rerun the setup script.
+- **Minikube fails to start with a memory error:** Docker Desktop has less than the 6 GB the cluster needs.
+  Raise it in Docker Desktop's settings, then `./scripts/teardown_cluster.sh` and run setup again.
+- **`cluster runs vX but K8S_VERSION is vY`:** your cluster was made with other settings. Tear it down and
+  run setup again.
+- **Setup times out on a health check:** rerun it (it picks up where it left off). If it keeps failing,
+  check `kubectl --context scale get pods -A` for pods that aren't `Running`.
+- **`No kubectl context 'scale'`** from the runner: run the setup script first.
+- **HPA shows `<unknown>` for targets:** metrics-server isn't ready yet. Wait a minute; check `kubectl --context scale top pods -n scale`.
+- **You changed the app:** bump the image tag (`v1` → `v2`) in `cloud-env/app/Dockerfile`'s comment,
+  `cloud-env/k8s/deployment.yaml` and `scripts/setup_cluster.sh`, then rerun setup. Results with different
+  app versions aren't comparable.
+- **Why not `kubectl port-forward` for load?** It sends every request to a single pod, so pods added by a
+  controller would get no traffic. The runner uses `minikube service` instead, which spreads load across all pods.
 
 If you hit something not covered here, add it to this file once you've solved it.
