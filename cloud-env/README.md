@@ -64,7 +64,8 @@ Each run writes `cloud-env/results/<time>_<workload>_<autoscaler>/` (with `_long
 
 | File | Contents |
 |---|---|
-| `replicas.csv` | Every 15 s: ready replicas, desired replicas, and the metric the autoscaler saw (CPU % for HPA, req/s per pod for KEDA) |
+| `replicas.csv` | Every 5 s: pods running (`pods_total`, what you pay for), pods ready to serve (`pods_ready`), what the autoscaler asked for, and the metric it saw (CPU % for HPA, req/s per pod for KEDA). `time` is Unix time, like Locust's files |
+| `server.csv` | Every 15 s, from Prometheus: req/s and p95 latency as the app measured them (arrival to response sent, so without network time) |
 | `locust_stats_history.csv` | Locust's req/s, response times and failures over time |
 | `locust_stats.csv`, `locust_failures.csv` | Run totals and any errors |
 | `locust.log` | Locust's console output (includes `bursty.py`'s burst schedule) |
@@ -78,7 +79,9 @@ To compare runs, plot the newest HPA and KEDA run of each workload:
 python cloud-env/plot_results.py
 ```
 
-It writes `cloud-env/results/plots/<workload>_<length>.png` (traffic, ready pods and p95 latency over time, HPA and KEDA overlaid) and `cloud-env/results/summary.md` (one row per run: latency, failures, peak pods, and pod-minutes as the cost).
+It writes `cloud-env/results/plots/<workload>_<length>.png` (traffic, ready pods and p95 latency over time, HPA and KEDA overlaid) and `cloud-env/results/summary.md`: one row per run (latency, failures, peak pods, pod-minutes as the cost, and scale-up/down times), then every sudden load change with how long the pods took to follow.
+
+**Scale-up time** runs from a jump in load until enough pods are *ready* for it; **scale-down time** from a drop until the pods *running* are down to what the new load needs. "Enough" allows the autoscalers' own 10% tolerance (at least load ÷ 33 pods going up, at most load ÷ 27 going down). Gradual changes (ramp, periodic) have no single moment to time from, so only the start and the final drop count there. A change that ends before the pods catch up shows as "not reached": in short runs, scale-up takes about a minute, longer than a burst or a 1-minute step.
 
 ## How it lines up with the simulator
 
