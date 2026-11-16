@@ -7,12 +7,20 @@ same length (short or --long) and writes to cloud-env/results/:
 
     plots/<workload>_<length>.png   three stacked panels over time:
                                     traffic, ready pods, p95 latency
-    summary.md                      one row per run: latency, failures,
-                                    pods used (cost)
+    summary.md                      one row per run (latency, failures, pods
+                                    used, scale-up/down times), then every
+                                    load change with its timing
 
-Only reads results; never touches the cluster. Times are from Locust's start;
-replicas.csv starts a few seconds earlier (while Locust's pod starts), which
-is close enough to compare the two autoscalers by eye.
+Scale-up time: from a jump in load until enough pods are READY for the new
+load. Scale-down time: from a drop in load until the pods RUNNING are down
+to what the new load needs. "Enough" allows the autoscalers' 10% tolerance:
+at least load / 33 pods going up, at most load / 27 going down (the target
+is load / 30). Timed to the 5 s pod samples. A load change that ends before
+the pods get there counts as "not reached".
+
+Only reads results; never touches the cluster. Times are seconds since
+Locust started (Unix timestamps in both files; older runs without them are
+aligned approximately).
 """
 
 from __future__ import annotations
@@ -55,11 +63,23 @@ def load_run(folder: Path) -> dict | None:
         traffic["rps"].append(float(r["Requests/s"]))
         traffic["p95"].append(float(r["95%"]) if r["95%"] not in ("N/A", "0") else math.nan)
 
-    replicas = {"t": [], "ready": []}
+    replicas = {"t": [], "ready": [], "total": []}
     for r in csv.DictReader((folder / "replicas.csv").open()):
-        if r["replicas_ready"]:
+        if "pods_ready" in r:  # 5 s samples with Unix time
+            replicas["t"].append((float(r["time"]) - t0) / 60)
+            replicas["ready"].append(int(r["pods_ready"]))
+            replicas["total"].append(int(r["pods_total"]))
+        elif r["replicas_ready"]:  # older runs: one count, time since the job started
             replicas["t"].append(int(r["elapsed_s"]) / 60)
             replicas["ready"].append(int(r["replicas_ready"]))
+            replicas["total"].append(int(r["replicas_ready"]))
+
+    server = {"t": [], "p95": []}
+    server_file = folder / "server.csv"
+    if server_file.exists():
+        for r in csv.DictReader(server_file.open()):
+            server["t"].append((float(r["time"]) - t0) / 60)
+            server["p95"].append(float(r["server_p95_ms"]) if r["server_p95_ms"] else math.nan)
 
     totals = {}
     stats_file = folder / "locust_stats.csv"
@@ -67,14 +87,70 @@ def load_run(folder: Path) -> dict | None:
         for r in csv.DictReader(stats_file.open()):
             if r["Name"] == "Aggregated":
                 totals = r
-    return {"meta": meta, "traffic": traffic, "replicas": replicas,
-            "totals": totals, "folder": folder.name}
+    run = {"meta": meta, "traffic": traffic, "replicas": replicas, "server": server,
+           "totals": totals, "folder": folder.name}
+    run["events"] = scale_events(run)
+    return run
 
 
 def pod_minutes(replicas: dict) -> float:
-    """Area under the ready-pods line: the cost of the run in pod-minutes."""
-    t, n = replicas["t"], replicas["ready"]
+    """Area under the running-pods line: the cost of the run in pod-minutes."""
+    t, n = replicas["t"], replicas["total"]
     return sum((t[i + 1] - t[i]) * n[i] for i in range(len(t) - 1))
+
+
+JUMP = 50  # req/s change within one second that counts as a load change
+
+
+def scale_events(run: dict) -> list[dict]:
+    """Every sudden load change in the run, with how long the pods took to follow.
+
+    Gradual changes (ramp, periodic) aren't events: there is no moment to
+    time from. Consecutive seconds of change (Locust starting users over a
+    few seconds) are one event.
+    """
+    t_s = [round(t * 60) for t in run["traffic"]["t"]]
+    users = run["traffic"]["users"]
+    starts = []  # (index where the change begins, index where it settles)
+    i = 1
+    while i < len(users):
+        if abs(users[i] - users[i - 1]) >= JUMP:
+            j = i
+            while j + 1 < len(users) and abs(users[j + 1] - users[j]) >= JUMP:
+                j += 1
+            starts.append((i - 1, j))
+            i = j + 1
+        else:
+            i += 1
+
+    rep = run["replicas"]
+    rep_s = [t * 60 for t in rep["t"]]
+    events = []
+    for n, (a, b) in enumerate(starts):
+        t0, before, after = t_s[a], users[a], users[b]
+        t_end = t_s[starts[n + 1][0]] if n + 1 < len(starts) else rep_s[-1] if rep_s else t0
+        up = after > before
+        need = max(1, math.ceil(after / (33 if up else 27)))
+        took = None
+        for t, ready, total in zip(rep_s, rep["ready"], rep["total"]):
+            if t < t0 or t > t_end:
+                continue
+            if (up and ready >= need) or (not up and total <= need):
+                took = t - t0
+                break
+        events.append({"t0_s": t0, "from": before, "to": after, "direction": "up" if up else "down",
+                       "pods_needed": need, "took_s": took, "window_s": t_end - t0})
+    return events
+
+
+def timing_cell(events: list[dict], direction: str) -> str:
+    """'median s (reached/total)' for one direction, e.g. '35 s (5/8)'."""
+    ev = [e for e in events if e["direction"] == direction]
+    if not ev:
+        return "-"
+    done = sorted(e["took_s"] for e in ev if e["took_s"] is not None)
+    median = f"{done[len(done) // 2]:.0f} s" if done else "never"
+    return f"{median} ({len(done)}/{len(ev)})"
 
 
 def newest_runs() -> dict:
@@ -127,8 +203,11 @@ def plot(workload: str, length: str, runs: dict, out: Path) -> None:
     for name, run in runs.items():
         ax_lat.plot(run["traffic"]["t"], run["traffic"]["p95"], color=COLOURS[name],
                     linewidth=1.5)
+        if run["server"]["t"]:  # the app's own measurement, from Prometheus
+            ax_lat.plot(run["server"]["t"], run["server"]["p95"], color=COLOURS[name],
+                        linewidth=1, linestyle="--")
     ax_lat.set_yscale("log")
-    style(ax_lat, "p95 latency (ms, log)")
+    style(ax_lat, "p95 latency (ms, log)\nsolid: Locust, dashed: server")
     ax_lat.set_xlabel("minutes since Locust started", color=MUTED)
 
     # One legend for all panels, under the title, so it never covers data.
@@ -150,8 +229,9 @@ def summary_row(run: dict) -> str:
     fail_pct = f"{100 * fails / reqs:.2f}%" if reqs else "-"
     cells = [m["workload"], m["length"], LABELS[m["autoscaler"]], f"{reqs:,}", fail_pct,
              t.get("50%", "-"), t.get("95%", "-"), t.get("99%", "-"),
-             str(max(run["replicas"]["ready"], default="-")),
-             f"{pod_minutes(run['replicas']):.0f}", run["folder"]]
+             str(max(run["replicas"]["total"], default="-")),
+             f"{pod_minutes(run['replicas']):.0f}",
+             timing_cell(run["events"], "up"), timing_cell(run["events"], "down"), run["folder"]]
     return "| " + " | ".join(cells) + " |"
 
 
@@ -161,17 +241,31 @@ def main() -> None:
         raise SystemExit(f"no complete runs in {RESULTS}")
     (RESULTS / "plots").mkdir(exist_ok=True)
     lines = ["| Workload | Length | Autoscaler | Requests | Failed | Median ms | p95 ms "
-             "| p99 ms | Peak pods | Pod-minutes | Run |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| p99 ms | Peak pods | Pod-minutes | Scale-up (reached) | Scale-down (reached) | Run |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    event_lines = ["| Workload | Length | Autoscaler | At (s) | Load change (req/s) "
+                   "| Pods needed | Took (s) |", "|---|---|---|---|---|---|---|"]
     for (workload, length), runs in sorted(groups.items()):
         runs = {k: runs[k] for k in ("hpa", "keda") if k in runs}
         out = RESULTS / "plots" / f"{workload}_{length}.png"
         plot(workload, length, runs, out)
         print(f"wrote {out.relative_to(RESULTS.parent)}")
         lines += [summary_row(run) for run in runs.values()]
+        for run in runs.values():
+            for e in run["events"]:
+                took = f"{e['took_s']:.0f}" if e["took_s"] is not None else \
+                    f"not reached in {e['window_s']:.0f}"
+                event_lines.append(
+                    f"| {workload} | {length} | {LABELS[run['meta']['autoscaler']]} | {e['t0_s']} "
+                    f"| {e['from']} → {e['to']} | {'≥' if e['direction'] == 'up' else '≤'} "
+                    f"{e['pods_needed']} | {took} |")
     (RESULTS / "summary.md").write_text(
         "Newest HPA and KEDA run per workload. Pod-minutes = area under the "
-        "ready-pods line (cost). Latency is over the whole run.\n\n" + "\n".join(lines) + "\n")
+        "running-pods line (cost). Latency is Locust's, over the whole run. "
+        "Scale-up/down: median time over the run's sudden load changes, and how "
+        "many reached the needed pods before load changed again (definitions at "
+        "the top of plot_results.py).\n\n" + "\n".join(lines)
+        + "\n\n## Every load change\n\n" + "\n".join(event_lines) + "\n", encoding="utf-8")
     print(f"wrote {(RESULTS / 'summary.md').relative_to(RESULTS.parent)}")
 
 

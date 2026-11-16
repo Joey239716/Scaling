@@ -11,15 +11,24 @@ import os
 import time
 
 from fastapi import FastAPI
-from prometheus_client import Counter, make_asgi_app
+from prometheus_client import Counter, Histogram, make_asgi_app
 
 WORK_MS = float(os.environ.get("WORK_MS", "4.2"))
 
 # KEDA scales on this (via Prometheus): total /work req/s across all pods.
 REQUESTS = Counter("app_requests", "Requests received by /work")
+# Server-side latency of /work: from arrival to the response being sent,
+# including time spent waiting behind other requests in this pod.
+LATENCY = Histogram(
+    "app_request_duration_seconds", "Time from a /work request arriving to its response",
+    # Fine around the ~5 ms a request takes, so p95 can be read to ~1 ms.
+    buckets=(0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.01, 0.015, 0.02, 0.03, 0.05,
+             0.075, 0.1, 0.15, 0.25, 0.5, 1, 2.5, 5, 10),
+)
 
 class CountWorkRequests:
-    """Counts /work requests as they arrive, before they wait their turn.
+    """Counts /work requests as they arrive, before they wait their turn,
+    and times each one until its response has been sent.
     Counting inside the handler would only count what the pod gets round to
     starting, so an overloaded pod would under-report demand.
     (A plain ASGI wrapper, not @app.middleware, which costs far more CPU.)"""
@@ -28,9 +37,15 @@ class CountWorkRequests:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope["path"] == "/work":
-            REQUESTS.inc()
-        await self.app(scope, receive, send)
+        if scope["type"] != "http" or scope["path"] != "/work":
+            await self.app(scope, receive, send)
+            return
+        REQUESTS.inc()
+        start = time.perf_counter()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            LATENCY.observe(time.perf_counter() - start)
 
 
 app = FastAPI()

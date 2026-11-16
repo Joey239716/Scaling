@@ -13,8 +13,11 @@ Every run starts from the same state (2 idle pods, fresh autoscaler), so HPA
 and KEDA runs of the same workload are directly comparable. Results go to
 cloud-env/results/<time>_<workload>_<autoscaler>/:
 
-    replicas.csv        every 15 s: replicas, what the autoscaler wanted,
-                        and the metric it saw (CPU % for HPA, req/s per pod for KEDA)
+    replicas.csv        every 5 s: pods running and ready, what the autoscaler
+                        wanted, and the metric it saw (CPU % for HPA, req/s per
+                        pod for KEDA); `time` is Unix time, as in Locust's CSVs
+    server.csv          every 15 s, from Prometheus: req/s and p95 latency as
+                        the app itself measured them
     locust_*.csv        Locust's own request rate / latency stats
     locust.log          Locust's console output (bursty's schedule, errors)
     run.json            what was run: workload, autoscaler, length, seed,
@@ -30,10 +33,12 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import shlex
 import subprocess
 import sys
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
@@ -41,7 +46,7 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 WORKLOADS = ["ramp", "spike", "periodic", "bursty", "step", "smoke"]
-SAMPLE_EVERY = 15  # seconds, same as the HPA sync period
+SAMPLE_EVERY = 5  # seconds; fine enough to time scale-up and scale-down
 START_REPLICAS = 2
 IDLE_BEFORE_RUN = 30  # seconds: 2 metrics refreshes, so CPU and req/s read idle
 # The HPA object each autoscaler creates (KEDA makes its own).
@@ -140,21 +145,31 @@ def start_locust(workload: str, run_id: str, seed: int, length: str) -> None:
 # --- recording --------------------------------------------------------------
 
 
-def sample(autoscaler: str) -> dict:
-    """One row of replicas.csv: what the autoscaler sees and decides right now."""
-    hpa = json.loads(kubectl("get", "hpa", HPA_NAME[autoscaler], "-o", "json"))
-    status = hpa.get("status", {})
+def sample(autoscaler: str) -> tuple[dict, str]:
+    """One row of replicas.csv, and the Locust job's state ('' while running,
+    else 'Complete' or 'Failed'). One kubectl call, so it fits in SAMPLE_EVERY."""
+    items = json.loads(kubectl(
+        "get", "deployment/scale-app", f"hpa/{HPA_NAME[autoscaler]}", "job/locust-run",
+        "-o", "json"))["items"]
+    by_kind = {i["kind"]: i for i in items}
+    deploy, hpa, job = by_kind["Deployment"], by_kind["HorizontalPodAutoscaler"], by_kind["Job"]
+    dstatus, hstatus = deploy.get("status", {}), hpa.get("status", {})
     metric = ""
-    for m in status.get("currentMetrics") or []:
+    for m in hstatus.get("currentMetrics") or []:
         if m["type"] == "Resource":  # HPA: average CPU, % of request
             metric = m["resource"]["current"].get("averageUtilization", "")
         elif m["type"] == "External":  # KEDA: average req/s per pod
             metric = parse_quantity(m["external"]["current"].get("averageValue", ""))
-    return {
-        "replicas_ready": status.get("currentReplicas", ""),
-        "replicas_desired": status.get("desiredReplicas", ""),
+    row = {
+        "pods_total": dstatus.get("replicas", 0),  # running pods, ready or starting (what you pay for)
+        "pods_ready": dstatus.get("readyReplicas", 0),  # pods passing readiness, serving traffic
+        "desired": hstatus.get("desiredReplicas", ""),  # what the autoscaler asked for
         "metric": metric,
     }
+    conditions = [c["type"] for c in job.get("status", {}).get("conditions") or []
+                  if c.get("status") == "True"]
+    state = next((c for c in ("Complete", "Failed") if c in conditions), "")
+    return row, state
 
 
 def parse_quantity(q: str) -> float | str:
@@ -164,33 +179,59 @@ def parse_quantity(q: str) -> float | str:
     return float(q[:-1]) / 1000 if q.endswith("m") else float(q)
 
 
-def job_finished() -> str:
-    """'' while Locust is running, else 'Complete' or 'Failed'."""
-    conditions = kubectl("get", "job", "locust-run",
-                         "-o", "jsonpath={.status.conditions[*].type}")
-    for state in ("Complete", "Failed"):
-        if state in conditions:
-            return state
-    return ""
-
-
-def record(autoscaler: str, out: Path) -> str:
-    """Write a replicas.csv row every 15 s until Locust finishes."""
+def record(autoscaler: str, out: Path) -> tuple[str, float, float]:
+    """Write a replicas.csv row every SAMPLE_EVERY s until Locust finishes.
+    Returns the job's final state and the first and last sample times."""
     start = time.time()
+    n = 0
     with open(out / "replicas.csv", "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=[
-            "elapsed_s", "replicas_ready", "replicas_desired", "metric"])
+            "time", "elapsed_s", "pods_total", "pods_ready", "desired", "metric"])
         writer.writeheader()
         while True:
-            row = {"elapsed_s": round(time.time() - start), **sample(autoscaler)}
+            now = time.time()
+            row, state = sample(autoscaler)
+            row = {"time": round(now, 1), "elapsed_s": round(now - start, 1), **row}
             writer.writerow(row)
             f.flush()
-            log(f"t={row['elapsed_s']:>4}s  replicas={row['replicas_ready']}"
-                f" -> {row['replicas_desired']}  metric={row['metric']}")
-            state = job_finished()
+            if n % 3 == 0:  # log every 15 s, record every 5 s
+                log(f"t={row['elapsed_s']:>6}s  pods ready={row['pods_ready']}"
+                    f"/{row['pods_total']} -> {row['desired']}  metric={row['metric']}")
             if state:
-                return state
-            time.sleep(SAMPLE_EVERY)
+                return state, start, now
+            n += 1
+            time.sleep(max(0.0, start + n * SAMPLE_EVERY - time.time()))
+
+
+# Server-side numbers from Prometheus (scraped every 15 s, so smoother than Locust's).
+PROM_QUERIES = {
+    "server_rps": 'sum(rate(app_requests_total{app="scale-app"}[45s]))',
+    "server_p95_ms": 'histogram_quantile(0.95, sum by (le) '
+                     '(rate(app_request_duration_seconds_bucket{app="scale-app"}[45s]))) * 1000',
+}
+
+
+def collect_prometheus(start: float, end: float, out: Path) -> None:
+    """Save Prometheus's request rate and p95 latency over the run to server.csv."""
+    columns: dict[float, dict] = {}
+    for name, query in PROM_QUERIES.items():
+        params = urllib.parse.urlencode(
+            {"query": query, "start": int(start), "end": int(end) + 15, "step": 15})
+        raw = kubectl("get", "--raw", "/api/v1/namespaces/monitoring/services/"
+                      f"prometheus-server:80/proxy/api/v1/query_range?{params}", check=False)
+        try:
+            series = json.loads(raw)["data"]["result"]
+        except (ValueError, KeyError):
+            log(f"could not read {name} from Prometheus")
+            continue
+        for t, v in (series[0]["values"] if series else []):
+            value = float(v)
+            columns.setdefault(t, {})[name] = "" if math.isnan(value) else round(value, 2)
+    with open(out / "server.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["time", "elapsed_s", *PROM_QUERIES])
+        writer.writeheader()
+        for t in sorted(columns):
+            writer.writerow({"time": t, "elapsed_s": round(t - start, 1), **columns[t]})
 
 
 def collect_locust_files(run_id: str, out: Path) -> None:
@@ -240,9 +281,10 @@ def main() -> None:
     check_metrics_resolution()
     reset_cluster(args.autoscaler, scale_down_wait)
     start_locust(args.workload, run_id, args.seed, length)
-    meta["locust_result"] = record(args.autoscaler, out)
+    meta["locust_result"], started, ended = record(args.autoscaler, out)
     meta["finished"] = datetime.now().isoformat()
     collect_locust_files(run_id, out)
+    collect_prometheus(started, ended, out)
     (out / "run.json").write_text(json.dumps(meta, indent=2))
     log(f"done ({meta['locust_result']}); results in {out}")
 
