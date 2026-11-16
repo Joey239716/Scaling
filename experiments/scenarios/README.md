@@ -6,8 +6,14 @@ gets exactly the same traffic for a given scenario.
 | Scenario | Shape |
 |---|---|
 | `gradual_ramp.py` | Example: 2 users, ramp to 30, hold, back to 2 (stages are fractions of `--duration`) |
+| `step_up.py` | 10 users, then steps of 17, 24, 31, 38 (15% of the run each), back to 10 for the last 25%. How long each controller takes to settle on each level |
+| `sudden_spike.py` | 10 users, instant jump to 40 from 30% to 55% of the run, then 10. Sudden load with no warning |
+| `daily_wave.py` | Two smooth cycles between 10 and 38 users in the first 75%, then 10. Does the controller track a predictable cycle or lag? |
+| `random_bursts.py` | 10 users with six short bursts (20 to 42 users, 2.5% to 7.5% of the run each), seeded so every run is identical. Does the controller over-react or flap? |
 
-`common.py` isn't a scenario: it holds `AppUser`, the shared user class.
+`common.py` isn't a scenario: it holds `AppUser`, the shared user class, and
+`DurationShape`, an optional base class for shapes written as users at each fraction of the run
+(the four scenarios above use it).
 
 ## Adding a scenario
 

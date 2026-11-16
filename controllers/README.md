@@ -5,7 +5,7 @@ Each folder here is one autoscaler that `experiments/run_experiment.py` can run:
 | Plugin | Status | What it is |
 |---|---|---|
 | [`hpa/`](hpa/) | Ready | Kubernetes HPA on CPU (60% target, 1 to 10 pods): the baseline |
-| [`keda/`](keda/) | To build | KEDA ScaledObject (KEDA is already installed by the setup script) |
+| [`keda/`](keda/) | Ready | KEDA on request rate (9 req/s per pod, 1 to 10 pods): the second baseline |
 | [`phpa/`](phpa/) | To build | Predictive Horizontal Pod Autoscaler |
 | [`llm/`](llm/) | To build | Our LLM-based controller, running as a separate process |
 

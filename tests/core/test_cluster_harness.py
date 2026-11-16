@@ -84,8 +84,9 @@ def test_metrics_csv_writes_missing_as_empty_cell(tmp_path):
 
 def test_plugin_without_parts_counts_as_not_implemented():
     runner = load_runner()
-    assert not any(runner.plugin_parts(REPO_ROOT / "controllers" / "keda").values())
+    assert not any(runner.plugin_parts(REPO_ROOT / "controllers" / "phpa").values())
     assert runner.plugin_parts(REPO_ROOT / "controllers" / "hpa")["manifests"]
+    assert runner.plugin_parts(REPO_ROOT / "controllers" / "keda")["manifests"]
 
 
 def test_plugin_env_says_what_to_scale_not_how_it_is_evaluated():

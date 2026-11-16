@@ -1,0 +1,48 @@
+# KEDA scaling scale-app on request rate (req/s), read from Prometheus.
+#   target       9 req/s per pod: the load at which a pod sits at the HPA's 60% CPU
+#                target (~7 ms CPU per request, 100m request), so both baselines aim
+#                for the same pod count and differ only in the signal they read
+#   replicas     1 to 10 (the shared bounds every controller uses)
+#   behavior     the same scale-up/scale-down rules as controllers/hpa (Kubernetes
+#                defaults, written out), since KEDA runs an HPA under the hood
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: scale-app
+  namespace: scale
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: scale-app
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 15   # how often KEDA queries Prometheus (s)
+  cooldownPeriod: 300   # only used for scaling to 0, which minReplicaCount 1 rules out
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://kps-prometheus.monitoring.svc:9090
+        # The same request-rate query as telemetry's request_rate_rps (docs/telemetry.md)
+        query: sum(rate(scale_app_requests_total{namespace="scale",path="/work"}[1m]))
+        threshold: "9"  # req/s per pod (KEDA divides the query result by this)
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          selectPolicy: Max
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+            - type: Pods
+              value: 4
+              periodSeconds: 15
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          selectPolicy: Max
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
